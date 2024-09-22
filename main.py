@@ -3,17 +3,17 @@ from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_requir
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Message, Mail
 from flask_cors import CORS
-#from dotenv import load_dotenv
+from dotenv import load_dotenv
 from datetime import timedelta, datetime
 import random
 import string
 import bcrypt
 import os
 
-#load_dotenv()
+load_dotenv()
 app = Flask(__name__)
-#app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY")
-app.config["JWT_SECRET_KEY"] = "fish"
+app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY")
+#app.config["JWT_SECRET_KEY"] = "fish"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///mydatabase.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["MAIL_SERVER"] = "smtp.gmail.com"
