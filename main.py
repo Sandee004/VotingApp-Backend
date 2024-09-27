@@ -3,17 +3,17 @@ from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_requir
 from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Message, Mail
 from flask_cors import CORS
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from datetime import timedelta, datetime
 import random
 import string
 import bcrypt
 import os
 
-load_dotenv()
+#load_dotenv()
 app = Flask(__name__)
-app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY")
-#app.config["JWT_SECRET_KEY"] = "fish"
+#app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY")
+app.config["JWT_SECRET_KEY"] = "fish"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///mydatabase.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["MAIL_SERVER"] = "smtp.gmail.com"
@@ -53,6 +53,7 @@ class Elections(db.Model):
     title = db.Column(db.String(100), nullable=False)
     startDate = db.Column(db.DateTime, nullable=False)
     endDate = db.Column(db.DateTime, nullable=False)
+    is_built = db.Column(db.Boolean, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
 questions = db.relationship('Questions', backref='election', lazy=True)
 
@@ -124,6 +125,7 @@ def login():
 @jwt_required()
 def election():
     user_id = get_jwt_identity()
+    #Creating an election
     if request.method == "POST":
         title = request.json.get("title")
         startDate = datetime.strptime(request.json.get("startDate"), "%Y-%m-%d")
@@ -143,18 +145,49 @@ def election():
         return jsonify(response_data), 201
     
     if request.method == "GET":
-        user_elections = Elections.query.filter_by(user_id=user_id).all()
-    
-        elections_data = []
-        for election in user_elections:
-            elections_data.append({
+        election_id = request.args.get('id')
+        if election_id:
+            # Fetch a single election
+            election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
+            if not election:
+                return jsonify({"message": "Election not found or unauthorized"}), 404
+
+            election_data = {
                 'id': election.id,
                 'title': election.title,
                 'startDate': election.startDate.isoformat(),
-                'endDate': election.endDate.isoformat()
-            })
-    
-        return jsonify(elections_data), 200
+                'endDate': election.endDate.isoformat(),
+                "is_built": election.is_built,
+            }
+
+            questions = Questions.query.filter_by(election_id=election_id).all()
+            questions_data = []
+            for question in questions:
+                questions_data.append({
+                    'id': question.id,
+                    'question_text': question.question_text,
+                    'question_type': question.question_type,
+                    'options': question.options
+                })
+            
+            election_data['questions'] = questions_data
+            election_data['questions_count'] = len(questions_data)
+
+            return jsonify(election_data), 200
+        else:
+            # Fetch all elections for the user
+            user_elections = Elections.query.filter_by(user_id=user_id).all()
+        
+            elections_data = []
+            for election in user_elections:
+                elections_data.append({
+                    'id': election.id,
+                    'title': election.title,
+                    'startDate': election.startDate.isoformat(),
+                    'endDate': election.endDate.isoformat(),
+                    'is_built': election.is_built,
+                })
+            return jsonify(elections_data), 200
 
 
 @app.route('/api/questions', methods=["POST", "GET"])
@@ -258,13 +291,10 @@ def preview():
 @app.route('/api/submit_ballot', methods=['POST'])
 #@jwt_required()
 def submit_ballot():
-    print("Me? Sharp")
     #user_id = get_jwt_identity()
     data = request.json
-    print("Got data")
     election_id = data.get('election_id')
     responses = data.get('responses')
-    print("Checks now")
 
     if not election_id or not responses:
         return jsonify({"message": "Invalid data"}), 400
@@ -292,45 +322,89 @@ def submit_ballot():
     db.session.commit()
     return jsonify({"message": "Ballot submitted successfully"}), 201
 
-@app.route('/api/results/<election_id>', methods=['GET'])
-@jwt_required()
-def get_results(election_id):
-    user_id = get_jwt_identity()
-    election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
 
+from collections import Counter
+
+@app.route('/api/results', methods=['GET'])
+@jwt_required()
+def get_results():
+    user_id = get_jwt_identity()
+    user = Users.query.get(user_id)
+
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+    
+    election_id = request.args.get('electionId')
+    if not election_id:
+        return jsonify({"message": "Election ID is required"}), 400
+
+    # Verify that the election belongs to the current user
+    election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
     if not election:
         return jsonify({"message": "Election not found or unauthorized"}), 404
 
     questions = Questions.query.filter_by(election_id=election_id).all()
-    results = {}
-    total_votes = Responses.query.filter_by(election_id=election_id).count()
-
-    for question in questions:
-        responses = Responses.query.filter_by(election_id=election_id, question_id=question.id)
-        
-        if question.question_type == 'multiple_choice':
-            option_counts = {option: 0 for option in question.options}
-            vote_counts = responses.with_entities(Responses.response, func.count(Responses.id)).group_by(Responses.response).all()
-            
-            for response, count in vote_counts:
-                option_counts[response] = count
-
-            results[question.id] = {
-                'question_text': question.question_text,
-                'type': 'multiple_choice',
-                'results': option_counts,
-                'total_votes': total_votes
+    user_info = {
+            "id": user.id,
+            "orgname": user.orgname,
+            "election": {
+                "id": election.id,
+                "title": election.title,
+                "questions": [
+                    {
+                        "id": q.id,
+                        "question_text": q.question_text,
+                        "question_type": q.question_type,
+                        "options": q.options,
+                        "votes": {}
+                    } for q in questions
+                ]
             }
-        elif question.question_type == 'text':
-            text_responses = [response.response for response in responses.all()]
-            results[question.id] = {
-                'question_text': question.question_text,
-                'type': 'text',
-                'results': text_responses,
-                'total_votes': total_votes
-            }
+        }
+        # Fetch all responses for this election
+    responses = Responses.query.filter_by(election_id=election_id).all()
 
-    return jsonify(results), 200
+    # Group responses by question
+    for response in responses:
+        question_index = next((i for i, q in enumerate(user_info["election"]["questions"]) if q["id"] == response.question_id), None)
+        if question_index is not None:
+            question = user_info["election"]["questions"][question_index]
+            if response.response in question["options"]:
+                if response.response in question["votes"]:
+                    question["votes"][response.response] += 1
+                else:
+                    question["votes"][response.response] = 1
+
+    return jsonify(user_info), 200
+
+
+@app.route('/api/build', methods=['POST'])
+@jwt_required()
+def build_election():
+    user_id = get_jwt_identity()
+    user = Users.query.get(user_id)
+
+    if not user:
+        return jsonify({"message": "User not found"}), 404
+
+    election_id = request.args.get('electionId')
+    if not election_id:
+        return jsonify({"message": "Election ID is required"}), 400
+    
+    election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
+    if not election:
+        return jsonify({"message": "Election not found or unauthorized"}), 404
+
+    if election.is_built:
+        print("I've built it already naw")
+        return jsonify({"message": "Election is already built"}), 400
+
+    # Build the election (implement your logic here)
+    election.is_built = True
+    print(f'Election {election_id} has been built nd set active')
+    db.session.commit()
+
+    return jsonify({"message": "Election built successfully"}), 200
 
 
 if __name__ == "__main__":
