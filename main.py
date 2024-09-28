@@ -4,7 +4,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_mail import Message, Mail
 from flask_cors import CORS
 #from dotenv import load_dotenv
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, timezone
 import random
 import string
 import bcrypt
@@ -55,7 +55,22 @@ class Elections(db.Model):
     endDate = db.Column(db.DateTime, nullable=False)
     is_built = db.Column(db.Boolean, default=False)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'))
-questions = db.relationship('Questions', backref='election', lazy=True)
+    questions = db.relationship('Questions', backref='election', lazy=True)
+    status = db.Column(db.String(20), default="Upcoming")
+
+    @property
+    def current_status(self):
+        now = datetime.now(timezone.utc)
+        start = self.startDate.replace(tzinfo=timezone.utc)
+        end = self.endDate.replace(tzinfo=timezone.utc)
+        if not self.is_built:
+            return "upcoming"
+        elif now < start:
+            return "upcoming"
+        elif start <= now <= end:
+            return "active"
+        else:
+            return "ended"
 
 
 class Questions(db.Model):
@@ -71,6 +86,7 @@ class Responses(db.Model):
     election_id = db.Column(db.String(5), db.ForeignKey('elections.id'), nullable=False)
     question_id = db.Column(db.Integer, db.ForeignKey('questions.id'), nullable=False)
     response = db.Column(db.String(500), nullable=False)
+    voter_ip = db.Column(db.String(45), nullable=False)
     submitted_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -125,11 +141,10 @@ def login():
 @jwt_required()
 def election():
     user_id = get_jwt_identity()
-    #Creating an election
     if request.method == "POST":
         title = request.json.get("title")
-        startDate = datetime.strptime(request.json.get("startDate"), "%Y-%m-%d")
-        endDate = datetime.strptime(request.json.get("endDate"), "%Y-%m-%d")
+        startDate = datetime.strptime(request.json.get("startDate"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        endDate = datetime.strptime(request.json.get("endDate"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
         election_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
 
@@ -146,6 +161,8 @@ def election():
     
     if request.method == "GET":
         election_id = request.args.get('id')
+        user = Users.query.get(user_id)
+
         if election_id:
             # Fetch a single election
             election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
@@ -155,9 +172,11 @@ def election():
             election_data = {
                 'id': election.id,
                 'title': election.title,
-                'startDate': election.startDate.isoformat(),
-                'endDate': election.endDate.isoformat(),
+                'startDate': election.startDate.replace(tzinfo=timezone.utc).isoformat(),
+                'endDate': election.endDate.replace(tzinfo=timezone.utc).isoformat(),
                 "is_built": election.is_built,
+                "orgname": user.orgname,
+                "status": election.current_status
             }
 
             questions = Questions.query.filter_by(election_id=election_id).all()
@@ -186,6 +205,8 @@ def election():
                     'startDate': election.startDate.isoformat(),
                     'endDate': election.endDate.isoformat(),
                     'is_built': election.is_built,
+                    "orgname": user.orgname,
+                    "status": election.status
                 })
             return jsonify(elections_data), 200
 
@@ -197,7 +218,6 @@ def manage_questions():
     
     if request.method == "POST":
         questions_data = request.get_json()
-        print(questions_data)
 
         # Validate data and extract election_ids
         election_ids = []
@@ -265,6 +285,9 @@ def preview():
     election = Elections.query.filter_by(id=election_id, user_id=user_id).first()
     if not election:
         return jsonify({"message": "Election not found or unauthorized"}), 404
+    
+    if election.status == "ended":
+        return jsonify({"message": "Election has ended"}), 403
 
     questions = Questions.query.filter_by(election_id=election_id).all()
 
@@ -274,6 +297,41 @@ def preview():
         "election": {
             "id": election.id,
             "title": election.title,
+            "status": election.status,
+            "questions": [
+                {
+                    "id": q.id,
+                    "question_text": q.question_text,
+                    "question_type": q.question_type,
+                    "options": q.options
+                } for q in questions
+            ]
+        }
+    }
+
+    return jsonify(user_info), 200
+
+
+@app.route('/api/liveview', methods=['GET'])
+def liveview():
+    election_id = request.args.get('electionId')
+    if not election_id:
+        return jsonify({"message": "Election ID is required"}), 400
+
+    election = Elections.query.filter_by(id=election_id).first()
+    if not election:
+        return jsonify({"message": "Election not found or unauthorized"}), 404
+    
+    if election.status == "ended":
+        return jsonify({"message": "Election has ended"}), 403
+
+    questions = Questions.query.filter_by(election_id=election_id).all()
+
+    user_info = {
+        "election": {
+            "id": election.id,
+            "title": election.title,
+            "status": election.status,
             "questions": [
                 {
                     "id": q.id,
@@ -289,7 +347,6 @@ def preview():
 
 
 @app.route('/api/submit_ballot', methods=['POST'])
-#@jwt_required()
 def submit_ballot():
     #user_id = get_jwt_identity()
     data = request.json
@@ -304,10 +361,14 @@ def submit_ballot():
     if not election:
         return jsonify({"message": "Election not found"}), 404
 
-    """current_time = datetime.utcnow()
-    if current_time < election.startDate or current_time > election.endDate:
-        return jsonify({"message": "Election is not active"}), 400
-"""
+    voter_ip = request.remote_addr
+    print(voter_ip)
+
+    # Check if this IP has already voted in this election
+    existing_vote = Responses.query.filter_by(election_id=election_id, voter_ip=voter_ip).first()
+    if existing_vote:
+        return jsonify({"message": "You have already submitted a ballot for this election"}), 400
+
     # Save responses
     for response in responses:
         question_id = response.get('question_id')
@@ -315,15 +376,14 @@ def submit_ballot():
         new_response = Responses(
             election_id=election_id,
             question_id=question_id,
-            response=answer
+            response=answer,
+            voter_ip=voter_ip,
         )
         db.session.add(new_response)
 
     db.session.commit()
     return jsonify({"message": "Ballot submitted successfully"}), 201
 
-
-from collections import Counter
 
 @app.route('/api/results', methods=['GET'])
 @jwt_required()
@@ -401,6 +461,7 @@ def build_election():
 
     # Build the election (implement your logic here)
     election.is_built = True
+    election.status = election.current_status
     print(f'Election {election_id} has been built nd set active')
     db.session.commit()
 
