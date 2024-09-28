@@ -206,7 +206,7 @@ def election():
                     'endDate': election.endDate.isoformat(),
                     'is_built': election.is_built,
                     "orgname": user.orgname,
-                    "status": election.status
+                    "status": election.current_status
                 })
             return jsonify(elections_data), 200
 
