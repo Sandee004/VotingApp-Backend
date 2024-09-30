@@ -9,6 +9,8 @@ import random
 import string
 import bcrypt
 import os
+import secrets
+
 
 #load_dotenv()
 app = Flask(__name__)
@@ -49,7 +51,7 @@ class Users(db.Model):
         return bcrypt.checkpw(password.encode('utf-8'), self.password)  
 
 class Elections(db.Model):
-    id = db.Column(db.String(5), primary_key=True)
+    id = db.Column(db.String(5), primary_key=True, unique=True)
     title = db.Column(db.String(100), nullable=False)
     startDate = db.Column(db.DateTime, nullable=False)
     endDate = db.Column(db.DateTime, nullable=False)
@@ -146,7 +148,8 @@ def election():
         startDate = datetime.strptime(request.json.get("startDate"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
         endDate = datetime.strptime(request.json.get("endDate"), "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-        election_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+        #election_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+        election_id = secrets.token_urlsafe(5)
 
         new_election = Elections(id=election_id, title=title, startDate=startDate, endDate=endDate, user_id=user_id)
         db.session.add(new_election)
